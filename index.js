@@ -1300,12 +1300,24 @@ io.on("connection", (socket) => {
     socket.emit("connected");
   });
 
+  socket.on("typing", (roomId) => {
+    // Emit to everyone else in the room that someone is typing
+    socket.to(roomId).emit("userTyping");
+  });
+  
+  socket.on("stopTyping", (roomId) => {
+    // Emit to everyone else in the room that typing stopped
+    socket.to(roomId).emit("userStoppedTyping");
+  });
+  
+
   socket.on("send_message", async(msg) => {
     try {
       const {
         senderId,
         senderName,
         serviceId,
+        serviceName,
         message,
         roomId,
         type,
@@ -1318,6 +1330,7 @@ io.on("connection", (socket) => {
         senderId: senderId,
         serviceId: serviceId,
         senderName,
+        serviceName,
         message: message,
         fileUrl: fileUrl,
         type: type,
@@ -1334,6 +1347,7 @@ io.on("connection", (socket) => {
         senderId,
         senderName,
         serviceId,
+        serviceName,
         message,
         fileUrl,
         type,
