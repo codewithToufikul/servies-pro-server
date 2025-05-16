@@ -101,6 +101,7 @@ app.get('/me',  async (req, res) => {
       name: user.name,
       email: user.username,
       number: user?.number,
+      address: user?.address,
       profileImage: user?.profileImage,
       role: user?.role,
       moderatorRole: user?.moderatorRole,
@@ -1015,8 +1016,7 @@ app.post('/update-profile-image', async (req, res) => {
 
 
 app.patch('/update-profile',  async (req, res) => {
-  const { userId, name, username, number } = req.body;
-console.log( userId, name, username, number )
+  const { userId, name, username, number , address} = req.body;
   try {
     const result = await usersCollection.updateOne(
       { _id: new ObjectId(userId) },
@@ -1025,6 +1025,7 @@ console.log( userId, name, username, number )
           name,
           username, // Replace email field
           number,
+          address,
         },
       }
     );
