@@ -1095,19 +1095,22 @@ app.get("/message-user", async (req, res) => {
   try {
     const latestMessages = await messagesCollection.aggregate([
       {
-        $match: { role: "client" } // শুধুমাত্র client role এর মেসেজ নিচ্ছে
+        $match: { role: "client" } // শুধু client role
       },
       {
-        $sort: { timestamp: -1 }
+        $sort: { timestamp: -1 } // নতুন মেসেজ আগে
       },
       {
         $group: {
-          _id: "$senderId",
-          latestMessage: { $first: "$$ROOT" }
+          _id: {
+            senderId: "$senderId",
+            serviceId: "$serviceId"
+          },
+          latestMessage: { $first: "$$ROOT" } // প্রতিটি senderId + serviceId combo এর প্রথম মেসেজ (সবচেয়ে নতুন)
         }
       },
       {
-        $replaceRoot: { newRoot: "$latestMessage" }
+        $replaceRoot: { newRoot: "$latestMessage" } // শুধু মেসেজের ডেটা দেখাবে
       }
     ]).toArray();
 
@@ -1117,6 +1120,7 @@ app.get("/message-user", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch messages" });
   }
 });
+
 
 
 app.post("/client-data", async (req, res) => {
