@@ -6,7 +6,7 @@ require('dotenv').config();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+// Stripe removed
 const { Server } = require('socket.io');
 const http = require('http');
 const transporter = require('./emailConfig');
@@ -56,8 +56,9 @@ async function run() {
 
     console.log("Connected to MongoDB");
 
-    app.listen(port, () => {
-      console.log(`Server listening on port ${port}`);
+    // Start only the HTTP server (Socket.IO attaches to this)
+    server.listen(port, () => {
+      console.log(`Server running on port ${port}`);
     });
 
   } catch (error) {
@@ -70,6 +71,22 @@ run();
 // Routes
 app.get("/", (req, res) => {
   res.send("Hello World!");
+});
+
+// Test route to check SSLCommerz configuration
+app.get("/test-sslcommerz", (req, res) => {
+  const config = {
+    STORE_ID: process.env.STORE_ID ? 'Set' : 'Missing',
+    STORE_PASSWORD: process.env.STORE_PASSWORD ? 'Set' : 'Missing',
+    BASE_URL: process.env.BASE_URL ? 'Set' : 'Missing',
+    NODE_ENV: process.env.NODE_ENV || 'Not set'
+  };
+  
+  res.json({
+    message: 'SSLCommerz Configuration Check',
+    config,
+    timestamp: new Date().toISOString()
+  });
 });
 
 function verifyToken(req, res, next) {
@@ -850,51 +867,232 @@ app.delete('/faq/:id', async (req, res) => {
 
 
 // Payment Intent route
-app.post('/create-payment-intent', async (req, res) => {
-  const { price, serviceId, userId } = req.body;
+// SSLCommerz Integration
+// Helper to build form-urlencoded body
+function toFormUrlEncoded(data) {
+  return Object.keys(data)
+    .map((key) => encodeURIComponent(key) + '=' + encodeURIComponent(data[key]))
+    .join('&');
+}
 
+// Initiate payment
+app.post('/initiate-payment', async (req, res) => {
   try {
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: price * 100, // amount in cents
-      currency: 'usd',
-      payment_method_types: ['card'],
+    // Check if required environment variables are set
+    if (!process.env.STORE_ID || !process.env.STORE_PASSWORD || !process.env.BASE_URL) {
+      console.error('Missing SSLCommerz environment variables:', {
+        STORE_ID: !!process.env.STORE_ID,
+        STORE_PASSWORD: !!process.env.STORE_PASSWORD,
+        BASE_URL: !!process.env.BASE_URL
+      });
+      return res.status(500).json({ 
+        error: 'SSLCommerz configuration missing. Please check environment variables.' 
+      });
+    }
+
+    const {
+      amount,
+      userId,
+      userName,
+      userProfileImage,
+      serviceId,
+      serviceName,
+      email,
+      phone,
+      address
+    } = req.body;
+
+    if (!amount || !userId || !serviceId || !serviceName) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    const tranId = `ssl_txn_${Date.now()}`;
+
+    // For local testing, use localhost URLs
+    const baseUrl =process.env.BASE_URL;
+    
+    const successUrl = `${baseUrl}/payment/success`;
+    const failUrl = `${baseUrl}/payment/fail`;
+    const cancelUrl = `${baseUrl}/payment/cancel`;
+
+    // Create a pending payment record for traceability
+    await paymentsCollection.insertOne({
+      userId,
+      userName,
+      userProfileImage,
+      serviceId,
+      serviceName,
+      amount: String(amount),
+      transactionId: tranId,
+      status: 'Success',
+      date: new Date(),
+      method: 'sslcommerz',
+      orderStatus: 'Pending'
     });
 
-    res.send({
-      clientSecret: paymentIntent.client_secret,
+    const payload = {
+      store_id: process.env.STORE_ID,
+      store_passwd: process.env.STORE_PASSWORD,
+      total_amount: parseFloat(amount).toFixed(2),
+      currency: 'BDT',
+      tran_id: tranId,
+      success_url: successUrl,
+      fail_url: failUrl,
+      cancel_url: cancelUrl,
+      // Customer info
+      cus_name: userName || 'Customer',
+      cus_email: email || 'no-email@unknown.local',
+      cus_add1: address || 'N/A',
+      cus_city: 'N/A',
+      cus_postcode: 'N/A',
+      cus_country: 'Bangladesh',
+      cus_phone: phone || 'N/A',
+      // Shipping (optional)
+      shipping_method: 'NO',
+      product_name: serviceName || 'Service',
+      product_category: 'Services',
+      product_profile: 'service',
+    };
+
+    const https = require('https');
+    const requestBody = toFormUrlEncoded(payload);
+
+    const options = {
+      hostname: 'securepay.sslcommerz.com',
+      path: '/gwprocess/v4/api.php',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(requestBody),
+      },
+    };
+
+    // Add timeout to the request
+    const timeout = 30000; // 30 seconds
+
+    const sslReq = https.request(options, (sslRes) => {
+      let data = '';
+      sslRes.on('data', (chunk) => { data += chunk; });
+      sslRes.on('end', () => {
+        try {
+          console.log('SSLCommerz response:', data);
+          const json = JSON.parse(data);
+          if (json?.GatewayPageURL) {
+            console.log('Payment initiated successfully, redirecting to:', json.GatewayPageURL);
+            return res.json({ url: json.GatewayPageURL, transactionId: tranId });
+          }
+          return res.status(500).json({ 
+            error: 'Failed to get GatewayPageURL from SSLCommerz', 
+            details: json,
+            status: json?.status,
+            message: json?.errorMessage || json?.message
+          });
+        } catch (err) {
+          console.error('SSLCommerz response parsing error:', err);
+          return res.status(500).json({ 
+            error: 'Invalid response from SSLCommerz', 
+            details: data,
+            parseError: err.message
+          });
+        }
+      });
     });
+
+    sslReq.on('error', (e) => {
+      console.error('SSLCommerz request error:', e);
+      return res.status(500).json({ error: e.message });
+    });
+
+    sslReq.on('timeout', () => {
+      sslReq.destroy();
+      return res.status(500).json({ error: 'SSLCommerz request timeout' });
+    });
+
+    sslReq.setTimeout(timeout);
+
+    sslReq.write(requestBody);
+    sslReq.end();
   } catch (error) {
-    res.status(500).send({ error: error.message });
+    console.error('initiate-payment error:', error);
+    res.status(500).json({ 
+      error: 'Failed to initiate payment',
+      details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
-
-app.post("/payment-success", async (req, res) => {
-  const { userId, userName, userProfileImage, serviceName, serviceId, amount, transactionId, status, orderStatus } = req.body;
-
-  if (status !== "succeeded") {
-    return res.status(400).send({ success: false, message: "Payment not successful" });
-  }
-
-  const paymentDoc = {
-    userId,
-    userName,
-    userProfileImage,
-    serviceId,
-    serviceName,
-    amount,
-    transactionId,
-    status,
-    date: new Date(),
-    method: "stripe",
-    orderStatus,
-  };
-
+// Success/Fail/Cancel callbacks (SSLCommerz typically posts here)
+app.post('/api/payment/success', async (req, res) => {
   try {
-    const result = await paymentsCollection.insertOne(paymentDoc);
-    res.send({ success: true, message: "Payment recorded", result });
+    const tranId = req.body?.tran_id || req.query?.tran_id;
+    if (!tranId) {
+      return res.status(400).send('Missing transaction id');
+    }
+    await paymentsCollection.updateOne(
+      { transactionId: tranId },
+      { $set: { status: 'VALIDATED' } }
+    );
+    // Redirect to frontend success page
+    const redirectUrl = `${process.env.BASE_URL}/payment/success?tran_id=${encodeURIComponent(tranId)}`;
+    return res.redirect(302, redirectUrl);
   } catch (error) {
-    res.status(500).send({ success: false, message: error.message });
+    console.error('payment success error:', error);
+    return res.status(500).send('Internal server error');
+  }
+});
+
+app.post('/api/payment/fail', async (req, res) => {
+  try {
+    const tranId = req.body?.tran_id || req.query?.tran_id;
+    if (tranId) {
+      await paymentsCollection.updateOne(
+        { transactionId: tranId },
+        { $set: { status: 'FAILED' } }
+      );
+    }
+    const redirectUrl = `${process.env.BASE_URL}/payment/fail${tranId ? `?tran_id=${encodeURIComponent(tranId)}` : ''}`;
+    return res.redirect(302, redirectUrl);
+  } catch (error) {
+    console.error('payment fail error:', error);
+    return res.status(500).send('Internal server error');
+  }
+});
+
+app.post('/api/payment/cancel', async (req, res) => {
+  try {
+    const tranId = req.body?.tran_id || req.query?.tran_id;
+    if (tranId) {
+      await paymentsCollection.updateOne(
+        { transactionId: tranId },
+        { $set: { status: 'CANCELLED' } }
+      );
+    }
+    const redirectUrl = `${process.env.BASE_URL}/payment/cancel${tranId ? `?tran_id=${encodeURIComponent(tranId)}` : ''}`;
+    return res.redirect(302, redirectUrl);
+  } catch (error) {
+    console.error('payment cancel error:', error);
+    return res.status(500).send('Internal server error');
+  }
+});
+
+// Optional IPN listener
+app.post('/api/payment/ipn', async (req, res) => {
+  try {
+    const tranId = req.body?.tran_id;
+    const status = req.body?.status;
+    if (!tranId) {
+      return res.status(400).json({ error: 'Missing tran_id' });
+    }
+    // Update based on IPN status quickly; optional: perform validation API call here
+    await paymentsCollection.updateOne(
+      { transactionId: tranId },
+      { $set: { status: status || 'VALIDATED' } }
+    );
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('IPN error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -1394,6 +1592,4 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3000, () => {
-  console.log("Socket.IO server running on port 3000");
-});
+// server already started above with server.listen(port)
